@@ -259,7 +259,7 @@ class Graphiti:
         source_description: str,
         reference_time: datetime,
         source: EpisodeType = EpisodeType.message,
-        group_id: str = '',
+        group_id: str = "",
         uuid: str | None = None,
         update_communities: bool = False,
         entity_types: dict[str, BaseModel] | None = None,
@@ -311,15 +311,23 @@ class Graphiti:
                 return {"message": "Episode processing started"}
         """
         try:
-            start = time()
+            start_total = time()
+            cumulative_time = 0.0
 
             entity_edges: list[EntityEdge] = []
             now = utc_now()
 
+            # 이전 에피소드 검색 시간 측정
+            start_time = time()
             previous_episodes = await self.retrieve_episodes(
                 reference_time, last_n=RELEVANT_SCHEMA_LIMIT, group_ids=[group_id]
             )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Retrieved previous episodes in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
+            # 에피소드 생성/조회 시간 측정
+            start_time = time()
             episode = (
                 await EpisodicNode.get_by_uuid(self.driver, uuid)
                 if uuid is not None
@@ -334,30 +342,36 @@ class Graphiti:
                     valid_at=reference_time,
                 )
             )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Created/retrieved episode in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
-            # Extract entities as nodes
+            # 노드 추출 시간 측정
+            start_time = time()
+            extracted_nodes = await extract_nodes(self.llm_client, episode, previous_episodes, entity_types)
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Extracted nodes in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
+            logger.debug(f"Extracted nodes: {[(n.name, n.uuid) for n in extracted_nodes]}")
 
-            extracted_nodes = await extract_nodes(
-                self.llm_client, episode, previous_episodes, entity_types
-            )
-            logger.debug(f'Extracted nodes: {[(n.name, n.uuid) for n in extracted_nodes]}')
+            # 임베딩 생성 시간 측정
+            start_time = time()
+            await semaphore_gather(*[node.generate_name_embedding(self.embedder) for node in extracted_nodes])
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Generated node embeddings in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
-            # Calculate Embeddings
-
-            await semaphore_gather(
-                *[node.generate_name_embedding(self.embedder) for node in extracted_nodes]
-            )
-
-            # Find relevant nodes already in the graph
+            # 관련 노드 검색 시간 측정
+            start_time = time()
             existing_nodes_lists: list[list[EntityNode]] = list(
-                await semaphore_gather(
-                    *[get_relevant_nodes(self.driver, [node]) for node in extracted_nodes]
-                )
+                await semaphore_gather(*[get_relevant_nodes(self.driver, [node]) for node in extracted_nodes])
             )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Retrieved relevant nodes in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
-            # Resolve extracted nodes with nodes already in the graph and extract facts
-            logger.debug(f'Extracted nodes: {[(n.name, n.uuid) for n in extracted_nodes]}')
-
+            # 노드 및 엣지 해결 시간 측정
+            start_time = time()
             (mentioned_nodes, uuid_map), extracted_edges = await semaphore_gather(
                 resolve_extracted_nodes(
                     self.llm_client,
@@ -367,26 +381,27 @@ class Graphiti:
                     previous_episodes,
                     entity_types,
                 ),
-                extract_edges(
-                    self.llm_client, episode, extracted_nodes, previous_episodes, group_id
-                ),
+                extract_edges(self.llm_client, episode, extracted_nodes, previous_episodes, group_id),
             )
-            logger.debug(f'Adjusted mentioned nodes: {[(n.name, n.uuid) for n in mentioned_nodes]}')
-            nodes = mentioned_nodes
-
-            extracted_edges_with_resolved_pointers = resolve_edge_pointers(
-                extracted_edges, uuid_map
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(
+                f"Resolved nodes and extracted edges in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)"
             )
 
-            # calculate embeddings
+            extracted_edges_with_resolved_pointers = resolve_edge_pointers(extracted_edges, uuid_map)
+
+            # 엣지 임베딩 생성 시간 측정
+            start_time = time()
             await semaphore_gather(
-                *[
-                    edge.generate_embedding(self.embedder)
-                    for edge in extracted_edges_with_resolved_pointers
-                ]
+                *[edge.generate_embedding(self.embedder) for edge in extracted_edges_with_resolved_pointers]
             )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Generated edge embeddings in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
-            # Resolve extracted edges with related edges already in the graph
+            # 관련 엣지 검색 시간 측정
+            start_time = time()
             related_edges_list: list[list[EntityEdge]] = list(
                 await semaphore_gather(
                     *[
@@ -401,13 +416,12 @@ class Graphiti:
                     ]
                 )
             )
-            logger.debug(
-                f'Related edges lists: {[(e.name, e.uuid) for edges_lst in related_edges_list for e in edges_lst]}'
-            )
-            logger.debug(
-                f'Extracted edges: {[(e.name, e.uuid) for e in extracted_edges_with_resolved_pointers]}'
-            )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Retrieved related edges in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
+            # 소스/타겟 엣지 검색 시간 측정
+            start_time = time()
             existing_source_edges_list: list[list[EntityEdge]] = list(
                 await semaphore_gather(
                     *[
@@ -437,12 +451,15 @@ class Graphiti:
                     ]
                 )
             )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Retrieved source/target edges in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
+            # 엣지 리스트 병합 및 해결 시간 측정
+            start_time = time()
             existing_edges_list: list[list[EntityEdge]] = [
                 source_lst + target_lst
-                for source_lst, target_lst in zip(
-                    existing_source_edges_list, existing_target_edges_list
-                )
+                for source_lst, target_lst in zip(existing_source_edges_list, existing_target_edges_list)
             ]
 
             resolved_edges, invalidated_edges = await resolve_extracted_edges(
@@ -453,42 +470,49 @@ class Graphiti:
                 episode,
                 previous_episodes,
             )
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Resolved and merged edges in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
+            # 엣지 확장 및 에피소딕 엣지 생성 시간 측정
+            start_time = time()
             entity_edges.extend(resolved_edges + invalidated_edges)
-
-            logger.debug(f'Resolved edges: {[(e.name, e.uuid) for e in resolved_edges]}')
-
             episodic_edges: list[EpisodicEdge] = build_episodic_edges(mentioned_nodes, episode, now)
-
-            logger.debug(f'Built episodic edges: {episodic_edges}')
-
             episode.entity_edges = [edge.uuid for edge in entity_edges]
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Built episodic edges in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
             if not self.store_raw_episode_content:
-                episode.content = ''
+                episode.content = ""
 
-            await add_nodes_and_edges_bulk(
-                self.driver, [episode], episodic_edges, nodes, entity_edges
-            )
+            # 데이터베이스 저장 시간 측정
+            start_time = time()
+            await add_nodes_and_edges_bulk(self.driver, [episode], episodic_edges, mentioned_nodes, entity_edges)
+            elapsed = (time() - start_time) * 1000
+            cumulative_time += elapsed
+            logger.warning(f"Saved to database in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
-            # Update any communities
+            # 커뮤니티 업데이트 시간 측정 (필요한 경우)
             if update_communities:
+                start_time = time()
                 await semaphore_gather(
-                    *[
-                        update_community(self.driver, self.llm_client, self.embedder, node)
-                        for node in nodes
-                    ]
+                    *[update_community(self.driver, self.llm_client, self.embedder, node) for node in mentioned_nodes]
                 )
-            end = time()
-            logger.info(f'Completed add_episode in {(end - start) * 1000} ms')
+                elapsed = (time() - start_time) * 1000
+                cumulative_time += elapsed
+                logger.warning(f"Updated communities in {elapsed:.2f}ms (cumulative: {cumulative_time:.2f}ms)")
 
-            return AddEpisodeResults(episode=episode, nodes=nodes, edges=entity_edges)
+            total_time = (time() - start_total) * 1000
+            logger.warning(f"Total add_episode execution time: {total_time:.2f}ms")
+
+            return AddEpisodeResults(episode=episode, nodes=mentioned_nodes, edges=entity_edges)
 
         except Exception as e:
             raise e
 
     #### WIP: USE AT YOUR OWN RISK ####
-    async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = ''):
+    async def add_episode_bulk(self, bulk_episodes: list[RawEpisode], group_id: str = ""):
         """
         Process multiple episodes in bulk and update the graph.
 
@@ -575,20 +599,14 @@ class Graphiti:
             extracted_edges_with_resolved_pointers: list[EntityEdge] = resolve_edge_pointers(
                 extracted_edges_timestamped, uuid_map
             )
-            episodic_edges_with_resolved_pointers: list[EpisodicEdge] = resolve_edge_pointers(
-                episodic_edges, uuid_map
-            )
+            episodic_edges_with_resolved_pointers: list[EpisodicEdge] = resolve_edge_pointers(episodic_edges, uuid_map)
 
             # save episodic edges to KG
-            await semaphore_gather(
-                *[edge.save(self.driver) for edge in episodic_edges_with_resolved_pointers]
-            )
+            await semaphore_gather(*[edge.save(self.driver) for edge in episodic_edges_with_resolved_pointers])
 
             # Dedupe extracted edges
-            edges = await dedupe_edges_bulk(
-                self.driver, self.llm_client, extracted_edges_with_resolved_pointers
-            )
-            logger.debug(f'extracted edge length: {len(edges)}')
+            edges = await dedupe_edges_bulk(self.driver, self.llm_client, extracted_edges_with_resolved_pointers)
+            logger.debug(f"extracted edge length: {len(edges)}")
 
             # invalidate edges
 
@@ -596,7 +614,7 @@ class Graphiti:
             await semaphore_gather(*[edge.save(self.driver) for edge in edges])
 
             end = time()
-            logger.info(f'Completed add_episode_bulk in {(end - start) * 1000} ms')
+            logger.info(f"Completed add_episode_bulk in {(end - start) * 1000} ms")
 
         except Exception as e:
             raise e
@@ -612,13 +630,9 @@ class Graphiti:
         # Clear existing communities
         await remove_communities(self.driver)
 
-        community_nodes, community_edges = await build_communities(
-            self.driver, self.llm_client, group_ids
-        )
+        community_nodes, community_edges = await build_communities(self.driver, self.llm_client, group_ids)
 
-        await semaphore_gather(
-            *[node.generate_name_embedding(self.embedder) for node in community_nodes]
-        )
+        await semaphore_gather(*[node.generate_name_embedding(self.embedder) for node in community_nodes])
 
         await semaphore_gather(*[node.save(self.driver) for node in community_nodes])
         await semaphore_gather(*[edge.save(self.driver) for edge in community_edges])
@@ -664,9 +678,7 @@ class Graphiti:
         The search is performed using the current date and time as the reference
         point for temporal relevance.
         """
-        search_config = (
-            EDGE_HYBRID_SEARCH_RRF if center_node_uuid is None else EDGE_HYBRID_SEARCH_NODE_DISTANCE
-        )
+        search_config = EDGE_HYBRID_SEARCH_RRF if center_node_uuid is None else EDGE_HYBRID_SEARCH_NODE_DISTANCE
         search_config.limit = num_results
 
         edges = (
@@ -751,9 +763,7 @@ class Graphiti:
         contradicting_edges = await get_edge_contradictions(self.llm_client, edge, related_edges)
         invalidated_edges = resolve_edge_contradictions(resolved_edge, contradicting_edges)
 
-        await add_nodes_and_edges_bulk(
-            self.driver, [], [], resolved_nodes, [resolved_edge] + invalidated_edges
-        )
+        await add_nodes_and_edges_bulk(self.driver, [], [], resolved_nodes, [resolved_edge] + invalidated_edges)
 
     async def remove_episode(self, episode_uuid: str):
         # Find the episode to be deleted
@@ -773,13 +783,15 @@ class Graphiti:
         # We should delete all nodes that are only mentioned in the deleted episode
         nodes_to_delete: list[EntityNode] = []
         for node in nodes:
-            query: LiteralString = 'MATCH (e:Episodic)-[:MENTIONS]->(n:Entity {uuid: $uuid}) RETURN count(*) AS episode_count'
+            query: LiteralString = (
+                "MATCH (e:Episodic)-[:MENTIONS]->(n:Entity {uuid: $uuid}) RETURN count(*) AS episode_count"
+            )
             records, _, _ = await self.driver.execute_query(
-                query, uuid=node.uuid, database_=DEFAULT_DATABASE, routing_='r'
+                query, uuid=node.uuid, database_=DEFAULT_DATABASE, routing_="r"
             )
 
             for record in records:
-                if record['episode_count'] == 1:
+                if record["episode_count"] == 1:
                     nodes_to_delete.append(node)
 
         await semaphore_gather(*[node.delete(self.driver) for node in nodes_to_delete])

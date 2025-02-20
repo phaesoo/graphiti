@@ -75,7 +75,7 @@ async def extract_edges(
     episode: EpisodicNode,
     nodes: list[EntityNode],
     previous_episodes: list[EpisodicNode],
-    group_id: str = '',
+    group_id: str = "",
 ) -> list[EntityEdge]:
     start = time()
 
@@ -85,23 +85,24 @@ async def extract_edges(
 
     # Prepare context for LLM
     context = {
-        'episode_content': episode.content,
-        'nodes': [node.name for node in nodes],
-        'previous_episodes': [ep.content for ep in previous_episodes],
-        'custom_prompt': '',
+        "episode_content": episode.content,
+        "nodes": [node.name for node in nodes],
+        "previous_episodes": [ep.content for ep in previous_episodes],
+        "custom_prompt": "",
     }
 
     facts_missed = True
     reflexion_iterations = 0
     while facts_missed and reflexion_iterations < MAX_REFLEXION_ITERATIONS:
+        print(prompt_library.extract_edges.edge(context))
         llm_response = await llm_client.generate_response(
             prompt_library.extract_edges.edge(context),
             response_model=ExtractedEdges,
             max_tokens=EXTRACT_EDGES_MAX_TOKENS,
         )
-        edges_data = llm_response.get('edges', [])
+        edges_data = llm_response.get("edges", [])
 
-        context['extracted_facts'] = [edge_data.get('fact', '') for edge_data in edges_data]
+        context["extracted_facts"] = [edge_data.get("fact", "") for edge_data in edges_data]
 
         reflexion_iterations += 1
         if reflexion_iterations < MAX_REFLEXION_ITERATIONS:
@@ -109,32 +110,28 @@ async def extract_edges(
                 prompt_library.extract_edges.reflexion(context), response_model=MissingFacts
             )
 
-            missing_facts = reflexion_response.get('missing_facts', [])
+            missing_facts = reflexion_response.get("missing_facts", [])
 
-            custom_prompt = 'The following facts were missed in a previous extraction: '
+            custom_prompt = "The following facts were missed in a previous extraction: "
             for fact in missing_facts:
-                custom_prompt += f'\n{fact},'
+                custom_prompt += f"\n{fact},"
 
-            context['custom_prompt'] = custom_prompt
+            context["custom_prompt"] = custom_prompt
 
             facts_missed = len(missing_facts) != 0
 
     end = time()
-    logger.debug(f'Extracted new edges: {edges_data} in {(end - start) * 1000} ms')
+    logger.debug(f"Extracted new edges: {edges_data} in {(end - start) * 1000} ms")
 
     # Convert the extracted data into EntityEdge objects
     edges = []
     for edge_data in edges_data:
         edge = EntityEdge(
-            source_node_uuid=node_uuids_by_name_map.get(
-                edge_data.get('source_entity_name', ''), ''
-            ),
-            target_node_uuid=node_uuids_by_name_map.get(
-                edge_data.get('target_entity_name', ''), ''
-            ),
-            name=edge_data.get('relation_type', ''),
+            source_node_uuid=node_uuids_by_name_map.get(edge_data.get("source_entity_name", ""), ""),
+            target_node_uuid=node_uuids_by_name_map.get(edge_data.get("target_entity_name", ""), ""),
+            name=edge_data.get("relation_type", ""),
             group_id=group_id,
-            fact=edge_data.get('fact', ''),
+            fact=edge_data.get("fact", ""),
             episodes=[episode.uuid],
             created_at=utc_now(),
             valid_at=None,
@@ -142,7 +139,7 @@ async def extract_edges(
         )
         edges.append(edge)
         logger.debug(
-            f'Created new edge: {edge.name} from (UUID: {edge.source_node_uuid}) to (UUID: {edge.target_node_uuid})'
+            f"Created new edge: {edge.name} from (UUID: {edge.source_node_uuid}) to (UUID: {edge.target_node_uuid})"
         )
 
     return edges
@@ -160,22 +157,18 @@ async def dedupe_extracted_edges(
 
     # Prepare context for LLM
     context = {
-        'extracted_edges': [
-            {'uuid': edge.uuid, 'name': edge.name, 'fact': edge.fact} for edge in extracted_edges
-        ],
-        'existing_edges': [
-            {'uuid': edge.uuid, 'name': edge.name, 'fact': edge.fact} for edge in existing_edges
-        ],
+        "extracted_edges": [{"uuid": edge.uuid, "name": edge.name, "fact": edge.fact} for edge in extracted_edges],
+        "existing_edges": [{"uuid": edge.uuid, "name": edge.name, "fact": edge.fact} for edge in existing_edges],
     }
 
     llm_response = await llm_client.generate_response(prompt_library.dedupe_edges.edge(context))
-    duplicate_data = llm_response.get('duplicates', [])
-    logger.debug(f'Extracted unique edges: {duplicate_data}')
+    duplicate_data = llm_response.get("duplicates", [])
+    logger.debug(f"Extracted unique edges: {duplicate_data}")
 
     duplicate_uuid_map: dict[str, str] = {}
     for duplicate in duplicate_data:
-        uuid_value = duplicate['duplicate_of']
-        duplicate_uuid_map[duplicate['uuid']] = uuid_value
+        uuid_value = duplicate["duplicate_of"]
+        duplicate_uuid_map[duplicate["uuid"]] = uuid_value
 
     # Get full edge data
     edges: list[EntityEdge] = []
@@ -250,9 +243,7 @@ def resolve_edge_contradictions(
             continue
         # New edge invalidates edge
         elif (
-            edge.valid_at is not None
-            and resolved_edge.valid_at is not None
-            and edge.valid_at < resolved_edge.valid_at
+            edge.valid_at is not None and resolved_edge.valid_at is not None and edge.valid_at < resolved_edge.valid_at
         ):
             edge.invalid_at = resolved_edge.valid_at
             edge.expired_at = edge.expired_at if edge.expired_at is not None else utc_now()
@@ -311,27 +302,25 @@ async def dedupe_extracted_edge(
     start = time()
 
     # Prepare context for LLM
-    related_edges_context = [
-        {'uuid': edge.uuid, 'name': edge.name, 'fact': edge.fact} for edge in related_edges
-    ]
+    related_edges_context = [{"uuid": edge.uuid, "name": edge.name, "fact": edge.fact} for edge in related_edges]
 
     extracted_edge_context = {
-        'uuid': extracted_edge.uuid,
-        'name': extracted_edge.name,
-        'fact': extracted_edge.fact,
+        "uuid": extracted_edge.uuid,
+        "name": extracted_edge.name,
+        "fact": extracted_edge.fact,
     }
 
     context = {
-        'related_edges': related_edges_context,
-        'extracted_edges': extracted_edge_context,
+        "related_edges": related_edges_context,
+        "extracted_edges": extracted_edge_context,
     }
 
     llm_response = await llm_client.generate_response(
         prompt_library.dedupe_edges.edge(context), response_model=EdgeDuplicate
     )
 
-    is_duplicate: bool = llm_response.get('is_duplicate', False)
-    uuid: str | None = llm_response.get('uuid', None)
+    is_duplicate: bool = llm_response.get("is_duplicate", False)
+    uuid: str | None = llm_response.get("uuid", None)
 
     edge = extracted_edge
     if is_duplicate:
@@ -341,9 +330,7 @@ async def dedupe_extracted_edge(
             edge = existing_edge
 
     end = time()
-    logger.debug(
-        f'Resolved Edge: {extracted_edge.name} is {edge.name}, in {(end - start) * 1000} ms'
-    )
+    logger.debug(f"Resolved Edge: {extracted_edge.name} is {edge.name}, in {(end - start) * 1000} ms")
 
     return edge
 
@@ -360,22 +347,22 @@ async def dedupe_edge_list(
         edge_map[edge.uuid] = edge
 
     # Prepare context for LLM
-    context = {'edges': [{'uuid': edge.uuid, 'fact': edge.fact} for edge in edges]}
+    context = {"edges": [{"uuid": edge.uuid, "fact": edge.fact} for edge in edges]}
 
     llm_response = await llm_client.generate_response(
         prompt_library.dedupe_edges.edge_list(context), response_model=UniqueFacts
     )
-    unique_edges_data = llm_response.get('unique_facts', [])
+    unique_edges_data = llm_response.get("unique_facts", [])
 
     end = time()
-    logger.debug(f'Extracted edge duplicates: {unique_edges_data} in {(end - start) * 1000} ms ')
+    logger.debug(f"Extracted edge duplicates: {unique_edges_data} in {(end - start) * 1000} ms ")
 
     # Get full edge data
     unique_edges = []
     for edge_data in unique_edges_data:
-        uuid = edge_data['uuid']
+        uuid = edge_data["uuid"]
         edge = edge_map[uuid]
-        edge.fact = edge_data['fact']
+        edge.fact = edge_data["fact"]
         unique_edges.append(edge)
 
     return unique_edges
